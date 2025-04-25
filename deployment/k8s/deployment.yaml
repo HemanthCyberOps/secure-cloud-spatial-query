@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server0
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: server0
+  template:
+    metadata:
+      labels:
+        app: server0
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: server0
+          image: mydockerhubusername/server0:latest  # ✅ Replace with your actual registry path
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: SECRET_KEY
+          resources:  # ✅ Added resource limits & requests
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: server1
+  template:
+    metadata:
+      labels:
+        app: server1
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: server1
+          image: mydockerhubusername/server1:latest  # ✅ Replace with your actual registry path
+          ports:
+            - containerPort: 5001
+          env:
+            - name: BLOB_STORAGE_ACCOUNT
+              value: "secureblobstorage"
+            - name: REDIS_HOST
+              value: "redis-service"
+          resources:  # ✅ Added resource limits & requests
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server2
+  template:
+    metadata:
+      labels:
+        app: server2
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: server2
+          image: mydockerhubusername/server2:latest  # ✅ Replace with your actual registry path
+          ports:
+            - containerPort: 5002
+          env:
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: SECRET_KEY
+          resources:  # ✅ Added resource limits & requests
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"

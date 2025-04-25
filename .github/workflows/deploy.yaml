@@ -1,0 +1,39 @@
+name: CI/CD Pipeline
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Login to Azure Container Registry
+        run: |
+          set -e
+          az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+          az acr login --name SecureDataRegistry
+
+      - name: Build and Push Docker Images
+        run: |
+          set -e
+          docker build -f backend/server_0/Dockerfile -t SecureDataRegistry.azurecr.io/server0:latest .
+          docker push SecureDataRegistry.azurecr.io/server0:latest
+          docker build -f backend/server_1/Dockerfile -t SecureDataRegistry.azurecr.io/server1:latest .
+          docker push SecureDataRegistry.azurecr.io/server1:latest
+          docker build -f backend/server_2/Dockerfile -t SecureDataRegistry.azurecr.io/server2:latest .
+          docker push SecureDataRegistry.azurecr.io/server2:latest
+
+      - name: Deploy to Kubernetes
+        run: |
+          set -e
+          az aks get-credentials --resource-group SecureDataGroup --name SecureDataAKS
+          if [ -d "./deployment/k8s" ]; then
+            kubectl apply -f ./deployment/k8s
+          else
+            echo "Error: Kubernetes manifests not found!"
+            exit 1
+          fi

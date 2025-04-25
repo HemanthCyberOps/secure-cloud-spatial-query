@@ -1,0 +1,6 @@
+gunicorn
+flask
+redis
+numpy
+requests
+pandas

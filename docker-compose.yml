@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  redis-container:
+    image: "redis:latest"
+    container_name: redis-container
+    restart: always
+    ports:
+      - "6379:6379"
+
+  server_0:
+    build:
+      context: .
+      dockerfile: backend/server_0/Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/dataset:/app/dataset  # ✅ Ensure dataset is mounted
+      - ./backend/shared:/app/shared
+    depends_on:
+      - redis-container
+
+  server_1:
+    build:
+      context: .
+      dockerfile: backend/server_1/Dockerfile
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./backend/dataset:/app/dataset  # ✅ Fix the dataset path
+      - ./backend/shared:/app/shared
+    depends_on:
+      - redis-container
+      - server_0
+
+  server_2:
+    build:
+      context: .
+      dockerfile: backend/server_2/Dockerfile
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./backend/dataset:/app/dataset  # ✅ Fix the dataset path
+      - ./backend/shared:/app/shared
+    depends_on:
+      - redis-container
+      - server_0

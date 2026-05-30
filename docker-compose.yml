@@ -1,47 +1,79 @@
 version: "3.8"
 
 services:
+
   redis-container:
-    image: "redis:latest"
+    image: "redis:7.2-alpine"
     container_name: redis-container
     restart: always
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   server_0:
     build:
       context: .
       dockerfile: backend/server_0/Dockerfile
+    container_name: server_0
     ports:
       - "5000:5000"
     volumes:
-      - ./backend/dataset:/app/dataset  # ✅ Ensure dataset is mounted
+      - ./backend/dataset:/app/dataset
       - ./backend/shared:/app/shared
+      - ./keys:/app/keys
+    environment:
+      - REDIS_HOST=redis-container   # ← service name, not localhost
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - IS_CLOUD=false
+      - SERVER_0_PORT=5000
+      - KEYS_DIR=/app/keys
     depends_on:
-      - redis-container
+      redis-container:
+        condition: service_healthy
 
   server_1:
     build:
       context: .
       dockerfile: backend/server_1/Dockerfile
+    container_name: server_1
     ports:
       - "5001:5001"
     volumes:
-      - ./backend/dataset:/app/dataset  # ✅ Fix the dataset path
+      - ./backend/dataset:/app/dataset
       - ./backend/shared:/app/shared
+      - ./keys:/app/keys
+    environment:
+      - REDIS_HOST=redis-container
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - IS_CLOUD=false
+      - SERVER_1_PORT=5001
+      - SERVER_2_URL=http://server_2:5002   # ← service name
+      - KEYS_DIR=/app/keys
     depends_on:
-      - redis-container
-      - server_0
+      redis-container:
+        condition: service_healthy
+      server_0:
+        condition: service_started
 
   server_2:
     build:
       context: .
       dockerfile: backend/server_2/Dockerfile
+    container_name: server_2
     ports:
       - "5002:5002"
     volumes:
-      - ./backend/dataset:/app/dataset  # ✅ Fix the dataset path
       - ./backend/shared:/app/shared
+      - ./keys:/app/keys
+    environment:
+      - IS_CLOUD=false
+      - SERVER_2_PORT=5002
+      - KEYS_DIR=/app/keys
     depends_on:
       - redis-container
-      - server_0

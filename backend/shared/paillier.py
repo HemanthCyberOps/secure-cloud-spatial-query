@@ -1,51 +1,127 @@
+"""
+Paillier Homomorphic Encryption helpers.
+
+Keys are generated ONCE and persisted to disk (keys/ directory).
+Every server loads the same keypair so encryption and decryption
+always use matching keys — even across restarts.
+"""
+import os
+import pickle
+import logging
+import sys
+from pathlib import Path
 from phe import paillier, EncryptedNumber
 
-# Generate a Paillier keypair with a reduced key size to avoid massive ciphertexts
-KEY_SIZE = 1024  # Reduce from 2048+ to 1024 for smaller encrypted numbers
-public_key, private_key = paillier.generate_paillier_keypair(n_length=KEY_SIZE)
+# Allow running this file directly for key generation
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from config.settings import PUBLIC_KEY_PATH, PRIVATE_KEY_PATH
 
-# Define a scaling factor to prevent overflow during encryption and summation
-SCALING_FACTOR = 1000  # Reduce encrypted value size significantly
+logger = logging.getLogger(__name__)
+
+# ── Key size ───────────────────────────────────────────────────────────────────
+KEY_SIZE = 1024          # 1024-bit is fine for a project / demo
+SCALING_FACTOR = 100     # Multiply floats by this before encrypting (int-only)
+
+
+# ── Key persistence ────────────────────────────────────────────────────────────
+
+def _save_keys(pub_key, priv_key) -> None:
+    PUBLIC_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(PUBLIC_KEY_PATH, "wb") as f:
+        pickle.dump(pub_key, f)
+    with open(PRIVATE_KEY_PATH, "wb") as f:
+        pickle.dump(priv_key, f)
+    logger.info("✅ Paillier keypair saved to %s", PUBLIC_KEY_PATH.parent)
+
+
+def _load_keys():
+    with open(PUBLIC_KEY_PATH, "rb") as f:
+        pub_key = pickle.load(f)
+    with open(PRIVATE_KEY_PATH, "rb") as f:
+        priv_key = pickle.load(f)
+    logger.info("✅ Paillier keypair loaded from disk.")
+    return pub_key, priv_key
+
+
+def _get_or_create_keys():
+    if PUBLIC_KEY_PATH.exists() and PRIVATE_KEY_PATH.exists():
+        try:
+            return _load_keys()
+        except Exception as e:
+            logger.warning("⚠️  Could not load keys (%s). Regenerating.", e)
+
+    logger.info("🔑 Generating new Paillier keypair (n_length=%d) …", KEY_SIZE)
+    pub_key, priv_key = paillier.generate_paillier_keypair(n_length=KEY_SIZE)
+    _save_keys(pub_key, priv_key)
+    return pub_key, priv_key
+
+
+# Module-level keypair — loaded once per process
+public_key, private_key = _get_or_create_keys()
+
+
+# ── Encryption helpers ─────────────────────────────────────────────────────────
+
+def encrypt_value(value: float) -> EncryptedNumber:
+    """Encrypt a single numeric value (scales to int first)."""
+    return public_key.encrypt(int(round(float(value) * SCALING_FACTOR)))
+
+
+def decrypt_value(enc_num: EncryptedNumber) -> float:
+    """Decrypt a single EncryptedNumber and return the original float."""
+    raw = private_key.decrypt(enc_num)
+    return raw / SCALING_FACTOR
+
 
 def encrypt_data(data):
-    """Encrypt numeric data with scaling to prevent large ciphertexts."""
+    """Encrypt a list of values or a single value."""
     if isinstance(data, list):
-        return [public_key.encrypt(int(value) // SCALING_FACTOR) for value in data]
-    return public_key.encrypt(int(data) // SCALING_FACTOR)
+        return [encrypt_value(v) for v in data]
+    return encrypt_value(data)
+
 
 def decrypt_data(encrypted_data):
-    """Safely decrypt encrypted data and apply overflow handling."""
+    """Decrypt a list of EncryptedNumbers or a single one."""
     if isinstance(encrypted_data, list):
-        return [safe_decrypt(value) for value in encrypted_data]
-    return safe_decrypt(encrypted_data)
+        return [decrypt_value(v) for v in encrypted_data]
+    return decrypt_value(encrypted_data)
 
-def safe_decrypt(enc_num):
-    """Safely decrypt an encrypted number and correct any modular overflow issues."""
-    decrypted_value = private_key.decrypt(enc_num)
 
-    # Correct modular overflow
-    n = public_key.n
-    if decrypted_value > (n // 2):
-        decrypted_value -= n
-    elif decrypted_value < 0:
-        decrypted_value += n
+# ── Homomorphic operations ─────────────────────────────────────────────────────
 
-    return max(0, decrypted_value * SCALING_FACTOR)  # Scale back to original values
-
-def homomorphic_addition(*enc_nums):
-    """Perform homomorphic addition while applying modular reduction to avoid overflow."""
+def homomorphic_addition(*enc_nums: EncryptedNumber) -> EncryptedNumber:
+    """
+    Add two or more EncryptedNumbers using the phe library's built-in
+    operator — this is the correct way to do Paillier addition.
+    """
     if not enc_nums:
-        raise ValueError("At least one encrypted number must be provided.")
+        raise ValueError("At least one EncryptedNumber is required.")
+    result = enc_nums[0]
+    for enc in enc_nums[1:]:
+        result = result + enc          # phe handles the math correctly
+    return result
 
-    n_squared = public_key.n ** 2  # Define the modulus squared to prevent overflow
-    result_ciphertext = sum(num.ciphertext() for num in enc_nums) % n_squared  # Apply modular reduction
 
-    return EncryptedNumber(public_key, result_ciphertext, exponent=0)  # Return properly formatted encrypted sum
-
-def homomorphic_multiplication(enc_num, scalar):
-    """Perform homomorphic scalar multiplication."""
+def homomorphic_multiplication(enc_num: EncryptedNumber, scalar) -> EncryptedNumber:
+    """Multiply an EncryptedNumber by a plaintext scalar."""
     if not isinstance(enc_num, EncryptedNumber):
-        raise TypeError("First input must be an EncryptedNumber instance.")
+        raise TypeError("First argument must be an EncryptedNumber.")
     if not isinstance(scalar, (int, float)):
-        raise TypeError("Scalar must be an integer or float.")
+        raise TypeError("Scalar must be int or float.")
     return enc_num * scalar
+
+
+def serialize_encrypted(enc_num: EncryptedNumber) -> dict:
+    """
+    Convert an EncryptedNumber to a JSON-serialisable dict so it can be
+    sent between servers over HTTP.
+    """
+    return {
+        "ciphertext": str(enc_num.ciphertext()),
+        "exponent": enc_num.exponent,
+    }
+
+
+def deserialize_encrypted(data: dict) -> EncryptedNumber:
+    """Reconstruct an EncryptedNumber from the dict produced by serialize_encrypted."""
+    return EncryptedNumber(public_key, int(data["ciphertext"]), int(data["exponent"]))

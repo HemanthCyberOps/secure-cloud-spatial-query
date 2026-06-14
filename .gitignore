@@ -1,0 +1,49 @@
+# ── Secrets & keys — NEVER commit ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+keys/
+*.pkl
+bloom_filter.pkl
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Node / Frontend ────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.*
+
+# ── IDE ────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ─────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Dataset — keep sample, ignore generated encrypted column ──────────────────
+# (the CSV is safe to commit — no real patient data)

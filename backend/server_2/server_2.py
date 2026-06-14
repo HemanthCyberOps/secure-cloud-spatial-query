@@ -1,130 +1,179 @@
-from flask import Flask, request, jsonify
-import os
+"""
+Server 2 — Crypto Engine
+Responsibilities:
+  • Decrypt a homomorphic sum forwarded from Server 1
+  • Decrypt arbitrary ciphertext lists
+  • Perform homomorphic addition / scalar multiplication and return result
+"""
 import sys
-import platform
-from phe.util import invert
-from phe import paillier
+import logging
+from pathlib import Path
 
-# Add backend directory to the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-# Import required cryptographic functions
-from shared.paillier import safe_decrypt, public_key, private_key, EncryptedNumber, SCALING_FACTOR
+# ── Path setup ─────────────────────────────────────────────────────────────────
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from config.settings import SERVER_2_PORT
+from shared.paillier import (
+    public_key, private_key,
+    decrypt_data, decrypt_value,
+    homomorphic_addition, homomorphic_multiplication,
+    serialize_encrypted, deserialize_encrypted,
+    SCALING_FACTOR,
+)
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger("server_2")
+
+# ── Flask app ──────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# ✅ Health Check API
-@app.route('/health', methods=['GET'])
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@app.route("/health", methods=["GET"])
 def health_check():
-    """Check if Server 2 is running."""
-    return jsonify({"status": "running"}), 200
+    return jsonify({"status": "running", "server": "server_2"}), 200
 
-# ✅ Decryption API
-@app.route('/decrypt', methods=['POST'])
-def decrypt():
-    """Decrypt data forwarded from Server 1."""
-    try:
-        encrypted_data = request.json.get('encrypted_data')
 
-        if not encrypted_data or not isinstance(encrypted_data, list):
-            return jsonify({"error": "Invalid or missing 'encrypted_data'. Expected a list."}), 400
+# ── Decrypt Sum ────────────────────────────────────────────────────────────────
 
-        decrypted_values = []
-        for ciphertext in encrypted_data:
-            try:
-                decrypted_value = private_key.decrypt(EncryptedNumber(public_key, int(ciphertext)))
-                decrypted_values.append(decrypted_value)
-            except Exception as e:
-                print(f"[ERROR] Failed to decrypt value {ciphertext}: {e}")
-                return jsonify({"error": f"Failed to decrypt value: {e}"}), 500
-
-        return jsonify({"decrypted_values": decrypted_values}), 200
-
-    except Exception as e:
-        print(f"[ERROR] Decryption error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# ✅ Secure Homomorphic Sum Decryption API
-@app.route('/decrypt_sum', methods=['POST'])
+@app.route("/decrypt_sum", methods=["POST"])
 def decrypt_sum():
-    """Safely decrypt a homomorphic sum and apply modular correction to prevent overflow."""
+    """
+    Decrypt a homomorphic sum forwarded from Server 1.
+
+    Body (JSON):
+        {
+          "encrypted_sum": {
+            "ciphertext": "<large int as string>",
+            "exponent": <int>
+          }
+        }
+
+    Response:
+        { "decrypted_sum": <float> }
+    """
+    body = request.get_json(silent=True) or {}
+    enc_data = body.get("encrypted_sum")
+
+    if not enc_data or not isinstance(enc_data, dict):
+        return jsonify({"error": "Missing or invalid 'encrypted_sum'. Expected a dict with 'ciphertext' and 'exponent'."}), 400
+
     try:
-        data = request.json
-        encrypted_sum_str = data.get("encrypted_sum")
+        enc_sum = deserialize_encrypted(enc_data)
+        result  = decrypt_value(enc_sum)
+        return jsonify({"decrypted_sum": result}), 200
+    except Exception as exc:
+        logger.exception("decrypt_sum failed")
+        return jsonify({"error": f"Decryption failed: {exc}"}), 500
 
-        if not encrypted_sum_str:
-            return jsonify({"error": "Missing encrypted_sum"}), 400
 
-        try:
-            # Convert encrypted sum string into integer and reconstruct EncryptedNumber
-            encrypted_sum_value = int(encrypted_sum_str)
-            encrypted_sum = EncryptedNumber(public_key, encrypted_sum_value)
+# ── Decrypt List ───────────────────────────────────────────────────────────────
 
-            # Perform decryption
-            decrypted_sum = private_key.decrypt(encrypted_sum)
+@app.route("/decrypt", methods=["POST"])
+def decrypt():
+    """
+    Decrypt a list of serialised EncryptedNumbers.
 
-            # Handle modular wrap-around to ensure correct values
-            n = public_key.n
-            if decrypted_sum > (n // 2):
-                decrypted_sum -= n  # Correct modular wrap-around
-            elif decrypted_sum < 0:
-                decrypted_sum += n  # Ensure positivity
+    Body (JSON):
+        {
+          "encrypted_data": [
+            { "ciphertext": "...", "exponent": 0 },
+            ...
+          ]
+        }
 
-            # Apply scaling factor correction
-            decrypted_sum *= SCALING_FACTOR  # Use same SCALING_FACTOR as in paillier.py
+    Response:
+        { "decrypted_values": [<float>, ...] }
+    """
+    body = request.get_json(silent=True) or {}
+    enc_list = body.get("encrypted_data")
 
-            return jsonify({"decrypted_sum": decrypted_sum}), 200
+    if not enc_list or not isinstance(enc_list, list):
+        return jsonify({"error": "Missing or invalid 'encrypted_data'. Expected a list of objects."}), 400
 
-        except Exception as e:
-            return jsonify({"error": f"Decryption failed: {str(e)}"}), 500
+    try:
+        results = []
+        for item in enc_list:
+            enc_num = deserialize_encrypted(item)
+            results.append(decrypt_value(enc_num))
+        return jsonify({"decrypted_values": results}), 200
+    except Exception as exc:
+        logger.exception("decrypt failed")
+        return jsonify({"error": f"Decryption failed: {exc}"}), 500
 
-    except Exception as e:
-        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
 
-# ✅ Homomorphic Operations API
-@app.route('/homomorphic_operations', methods=['POST'])
+# ── Homomorphic Operations ─────────────────────────────────────────────────────
+
+@app.route("/homomorphic_operations", methods=["POST"])
 def homomorphic_operations():
-    """Perform homomorphic addition and scalar multiplication."""
+    """
+    Perform homomorphic addition or scalar multiplication, then decrypt.
+
+    Body (JSON) for addition:
+        {
+          "operation": "addition",
+          "encrypted_values": [
+            { "ciphertext": "...", "exponent": 0 },
+            ...
+          ]
+        }
+
+    Body (JSON) for multiplication:
+        {
+          "operation": "multiplication",
+          "encrypted_values": [ { "ciphertext": "...", "exponent": 0 } ],
+          "scalar": 3
+        }
+
+    Response:
+        { "decrypted_result": <float> }
+    """
+    body = request.get_json(silent=True) or {}
+    operation     = body.get("operation")
+    enc_list      = body.get("encrypted_values")
+    scalar        = body.get("scalar")
+
+    if not enc_list or not isinstance(enc_list, list):
+        return jsonify({"error": "Missing or invalid 'encrypted_values'."}), 400
+
     try:
-        request_data = request.json
-        operation = request_data.get("operation")
-        encrypted_values = request_data.get("encrypted_values")
-        scalar = request_data.get("scalar")
+        enc_numbers = [deserialize_encrypted(item) for item in enc_list]
+    except Exception as exc:
+        return jsonify({"error": f"Could not deserialise encrypted values: {exc}"}), 400
 
-        if not encrypted_values or not isinstance(encrypted_values, list):
-            return jsonify({"error": "Invalid or missing 'encrypted_values'. Expected a list."}), 400
-
-        enc_numbers = []
-        for val in encrypted_values:
-            try:
-                enc_num = EncryptedNumber(public_key, int(val))
-                enc_numbers.append(enc_num)
-            except Exception as e:
-                print(f"[ERROR] Invalid encrypted value {val}: {e}")
-                return jsonify({"error": f"Invalid encrypted value: {e}"}), 400
-
+    try:
         if operation == "addition":
-            result_enc = sum(enc_numbers)
+            result_enc = homomorphic_addition(*enc_numbers)
+
         elif operation == "multiplication":
             if scalar is None:
-                return jsonify({"error": "Missing 'scalar' for multiplication."}), 400
-            result_enc = enc_numbers[0] * scalar
+                return jsonify({"error": "'scalar' is required for multiplication."}), 400
+            if len(enc_numbers) != 1:
+                return jsonify({"error": "Multiplication expects exactly one encrypted value."}), 400
+            result_enc = homomorphic_multiplication(enc_numbers[0], scalar)
+
         else:
-            return jsonify({"error": "Invalid operation. Supported: 'addition', 'multiplication' with scalar."}), 400
+            return jsonify({"error": "Unknown operation. Use 'addition' or 'multiplication'."}), 400
 
-        decrypted_result = private_key.decrypt(result_enc)
-        return jsonify({"decrypted_result": decrypted_result}), 200
+        decrypted = decrypt_value(result_enc)
+        return jsonify({"decrypted_result": decrypted}), 200
 
-    except Exception as e:
-        print(f"[ERROR] Homomorphic operation error: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception as exc:
+        logger.exception("homomorphic_operations failed")
+        return jsonify({"error": str(exc)}), 500
 
-# ✅ Server Setup for Local & Azure Deployment
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    if platform.system() == "Windows":
-        SERVER_2_PORT = 5002  # Default local port
-    else:
-        SERVER_2_PORT = int(os.getenv("SERVER_2_PORT", 5002))
-
-    print(f"[INFO] Server 2 is running on port {SERVER_2_PORT}...")
-    app.run(host="0.0.0.0", port=SERVER_2_PORT, debug=True)
+    logger.info("🚀 Server 2 starting on port %d …", SERVER_2_PORT)
+    app.run(host="0.0.0.0", port=SERVER_2_PORT, debug=False)

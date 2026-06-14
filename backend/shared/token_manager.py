@@ -1,93 +1,114 @@
-import redis
-import logging
-import os
+"""
+Token Manager — Redis-backed access and query token lifecycle.
+
+Access token  : long-lived (1 hour), identifies a user session.
+Query token   : short-lived (10 min), scoped to a single query intent.
+"""
 import secrets
-import socket
+import logging
+import sys
+from pathlib import Path
 
-# ✅ Set IS_CLOUD to False since you want to connect to local Redis
-IS_CLOUD = False
+import redis
 
-# ✅ Configure Redis Connection for Local Redis
-REDIS_HOST = "localhost" if not IS_CLOUD else "securestorage-redis.redis.cache.windows.net"
-REDIS_PORT = 6379 if not IS_CLOUD else 6380
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
-USE_SSL = IS_CLOUD  # Only enable SSL for Azure Redis
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from config.settings import REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, USE_SSL
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# ✅ Redis Connection Logic
-try:
-    logging.info(f"🚀 Connecting to Redis at {REDIS_HOST}:{REDIS_PORT}")
-    r = redis.StrictRedis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        password=REDIS_PASSWORD,
-        ssl=USE_SSL,
-        ssl_cert_reqs=None if USE_SSL else None
-    )
-    r.ping()  # Test connection
-    logging.info("✅ Redis Connection Successful!")
-except redis.ConnectionError as e:
-    logging.error(f"❌ Redis Connection Failed: {e}")
-    r = None
+# ── Redis connection (module-level singleton) ──────────────────────────────────
+
+def _connect_redis() -> redis.Redis | None:
+    try:
+        client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD,
+            ssl=USE_SSL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+        )
+        client.ping()
+        logger.info("✅ Redis connected at %s:%s", REDIS_HOST, REDIS_PORT)
+        return client
+    except redis.ConnectionError as exc:
+        logger.error("❌ Redis connection failed: %s", exc)
+        return None
+
+
+_redis_client: redis.Redis | None = _connect_redis()
+
+
+# ── Token Manager ──────────────────────────────────────────────────────────────
 
 class TokenManager:
+    """Manages access tokens and query tokens via Redis."""
+
+    ACCESS_TOKEN_TTL = 3600   # seconds (1 hour)
+    QUERY_TOKEN_TTL  = 600    # seconds (10 minutes)
+
+    # Redis key prefixes to avoid collisions
+    _ACCESS_PREFIX = "access:"
+    _QUERY_PREFIX  = "query:"
+
     def __init__(self):
-        """Initialize Token Manager with Redis Connection"""
-        if r:
-            self.redis_client = r
-        else:
-            self.redis_client = None  # Redis client not initialized due to connection failure
-            logging.warning("⚠️ Redis not available. Fallback to other storage mechanisms.")
+        self._r = _redis_client
+        if not self._r:
+            logger.warning("⚠️  TokenManager: Redis unavailable — all auth will fail.")
 
-    def generate_access_token(self, user_id):
-        """Generate and store an access token for a user."""
-        if not self.redis_client:
-            raise Exception("❌ Redis is not connected!")
+    def _require_redis(self):
+        if not self._r:
+            raise RuntimeError("Redis is not connected.")
 
+    # ── Access tokens ──────────────────────────────────────────────────────────
+
+    def generate_access_token(self, user_id: str) -> str:
+        self._require_redis()
         token = secrets.token_hex(32)
-        self.redis_client.set(token, user_id, ex=3600)  # Token expires in 1 hour
+        self._r.set(f"{self._ACCESS_PREFIX}{token}", user_id, ex=self.ACCESS_TOKEN_TTL)
+        logger.info("🔑 Access token generated for user '%s'", user_id)
         return token
 
-    def validate_access_token(self, token):
-        """Check if an access token exists in Redis."""
-        return self.redis_client.exists(token) == 1 if self.redis_client else False
-
-    def revoke_tokens_for_user(self, user_id):
-        """Revoke all access tokens associated with a user."""
-        if not self.redis_client:
+    def validate_access_token(self, token: str) -> bool:
+        if not self._r or not token:
             return False
+        return self._r.exists(f"{self._ACCESS_PREFIX}{token}") == 1
 
-        keys = self.redis_client.keys("*")
-        for key in keys:
-            if self.redis_client.get(key) == user_id:
-                self.redis_client.delete(key)
+    def get_user_for_token(self, token: str) -> str | None:
+        if not self._r:
+            return None
+        return self._r.get(f"{self._ACCESS_PREFIX}{token}")
 
-    def generate_query_token(self, access_token, query):
-        """Generate a temporary query token linked to an access token."""
+    def revoke_access_token(self, token: str) -> None:
+        if self._r:
+            self._r.delete(f"{self._ACCESS_PREFIX}{token}")
+
+    # ── Query tokens ───────────────────────────────────────────────────────────
+
+    def generate_query_token(self, access_token: str, query: str) -> str:
+        self._require_redis()
         if not self.validate_access_token(access_token):
-            raise ValueError("❌ Invalid access token")
+            raise ValueError("Invalid or expired access token.")
+        token = secrets.token_hex(32)
+        self._r.set(f"{self._QUERY_PREFIX}{token}", access_token, ex=self.QUERY_TOKEN_TTL)
+        logger.info("🔑 Query token generated (query=%s)", query)
+        return token
 
-        query_token = secrets.token_hex(32)
-        self.redis_client.set(query_token, access_token, ex=600)  # Query token expires in 10 minutes
-        return query_token
+    def validate_query_token(self, access_token: str, query_token: str) -> bool:
+        """Return True only if the query token exists AND is linked to the given access token."""
+        if not self._r or not access_token or not query_token:
+            return False
+        stored = self._r.get(f"{self._QUERY_PREFIX}{query_token}")
+        return stored == access_token
 
-    def validate_query_token(self, access_token, query_token):
-        """Validate if a query token is linked to the provided access token."""
-        stored_access_token = self.redis_client.get(query_token)
-        # ✅ Convert Redis bytes response to a string
-        if stored_access_token:
-            stored_access_token = stored_access_token.decode("utf-8")
-            return stored_access_token == access_token
+    def revoke_query_token(self, query_token: str) -> None:
+        if self._r:
+            self._r.delete(f"{self._QUERY_PREFIX}{query_token}")
 
-    def revoke_query_token(self, query_token):
-        """Revoke a specific query token."""
-        if self.redis_client:
-            self.redis_client.delete(query_token)
+    # ── Utility ────────────────────────────────────────────────────────────────
 
-    def list_active_tokens(self):
-        """Retrieve a list of active tokens stored in Redis."""
-        if not self.redis_client:
+    def list_active_tokens(self) -> dict:
+        if not self._r:
             return {}
-        return {key: self.redis_client.get(key) for key in self.redis_client.keys("*")}
+        keys = self._r.keys(f"{self._ACCESS_PREFIX}*")
+        return {k: self._r.get(k) for k in keys}

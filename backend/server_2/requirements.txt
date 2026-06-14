@@ -1,7 +1,6 @@
-flask
-gunicorn
-numpy
-pandas
-redis
-requests
-phe
+flask==3.0.3
+phe==1.5.0
+numpy==1.26.4
+requests==2.32.3
+python-dotenv==1.0.1
+gunicorn==22.0.0
